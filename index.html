@@ -8,26 +8,46 @@
 body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:#f3f5f2;color:#16221b;line-height:1.4}
 main{max-width:520px;margin:0 auto;padding:16px}
 h1{font-size:1.3rem;margin:4px 0 12px}
+h2{font-size:1rem;margin:22px 0 6px}
 #reader{width:100%;min-height:80px;background:#000;border-radius:12px;overflow:hidden}
 button,label.btn{display:block;width:100%;margin-top:10px;padding:14px;font:inherit;font-weight:600;border-radius:10px;border:1px solid #0b6b4f;background:#0b6b4f;color:#fff;text-align:center;cursor:pointer;box-sizing:border-box}
 button.sec,label.btn{background:#fff;color:#0b6b4f}
 input[type=file]{display:none}
 #status{margin:10px 0;color:#5d6b62;font-size:.95rem}
 #status.err{color:#b3261e}
+#tools{display:none;margin-top:10px}
+#zoomRow{display:none;align-items:center;gap:10px;margin-top:10px}
+#zoomRow input{flex:1;min-height:32px;accent-color:#0b6b4f}
+#torch{display:none}
+#manual{display:flex;gap:8px}
+#manual input{flex:1;min-width:0;padding:14px;font:inherit;border:1px solid #9aa89f;border-radius:10px;background:#fff;color:#16221b}
+#manual button{width:auto;margin-top:0;padding:14px 18px}
 #result{display:none;margin-top:12px;padding:14px;background:#fff;border:2px solid #0b6b4f;border-radius:12px}
 #result small{color:#5d6b62}
 #code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:1.3rem;word-break:break-all;margin:4px 0 0}
-@media (prefers-color-scheme:dark){body{background:#0f1713;color:#e8f0ea}#result{background:#18231d;border-color:#4fd1a0}button.sec,label.btn{background:#18231d;color:#4fd1a0;border-color:#4fd1a0}button{background:#4fd1a0;color:#06251a;border-color:#4fd1a0}#status,#result small{color:#9bab9f}}
+:focus-visible{outline:3px solid #0b6b4f;outline-offset:2px}
+@media (prefers-color-scheme:dark){body{background:#0f1713;color:#e8f0ea}#result{background:#18231d;border-color:#4fd1a0}button.sec,label.btn{background:#18231d;color:#4fd1a0;border-color:#4fd1a0}button{background:#4fd1a0;color:#06251a;border-color:#4fd1a0}#status,#result small{color:#9bab9f}#manual input{background:#18231d;color:#e8f0ea;border-color:#4a5c50}#zoomRow input{accent-color:#4fd1a0}:focus-visible{outline-color:#4fd1a0}}
 </style>
 </head>
 <body>
 <main>
   <h1>Leitor de código de barras</h1>
   <div id="reader"></div>
+  <div id="tools">
+    <button class="sec" id="torch">Ligar lanterna</button>
+    <div id="zoomRow"><label for="zoom">Zoom</label><input type="range" id="zoom"></div>
+  </div>
   <p id="status">Toque em “Iniciar leitura”.</p>
   <button id="start">Iniciar leitura</button>
   <label class="btn" for="file">Ler a partir de uma foto</label>
   <input type="file" id="file" accept="image/*" capture="environment">
+
+  <h2>Digitar o número</h2>
+  <form id="manual" autocomplete="off">
+    <input id="num" type="text" inputmode="text" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="Digite o código" aria-label="Número do código de barras">
+    <button type="submit">Usar</button>
+  </form>
+
   <div id="result"><small id="fmt"></small><div id="code"></div><button class="sec" id="copy">Copiar</button></div>
 </main>
 
@@ -35,25 +55,74 @@ input[type=file]{display:none}
 <script>
 (function(){
   var $=function(i){return document.getElementById(i);};
-  var statusEl=$('status'),startBtn=$('start'),resultEl=$('result'),scanner=null,running=false;
+  var statusEl=$('status'),startBtn=$('start'),resultEl=$('result'),torchBtn=$('torch'),zoomEl=$('zoom'),
+      scanner=null,running=false,torchOn=false;
 
   function say(t,err){statusEl.textContent=t;statusEl.className=err?'err':'';}
-  if(typeof Html5Qrcode==='undefined'){say('Não foi possível carregar a biblioteca de leitura. Verifique a internet e recarregue a página.',true);return;}
+
+  function show(text,res,label){
+    try{if(navigator.vibrate)navigator.vibrate(100);}catch(e){}
+    var f=label||'';
+    if(!f){try{f='Formato: '+res.result.format.formatName.replace(/_/g,' ');}catch(e){}}
+    $('fmt').textContent=f;$('code').textContent=text;resultEl.style.display='block';
+    $('copy').textContent='Copiar';
+  }
+
+  // Digitar o número manualmente (funciona mesmo sem a biblioteca de leitura)
+  $('manual').onsubmit=function(e){
+    e.preventDefault();
+    var v=$('num').value.trim();
+    if(!v){say('Digite o número do código.',true);return;}
+    say('Número registrado.');show(v,null,'Digitado manualmente');
+  };
+
+  $('copy').onclick=function(){
+    var t=$('code').textContent,b=this;
+    var done=function(){b.textContent='Copiado';setTimeout(function(){b.textContent='Copiar';},1200);};
+    if(navigator.clipboard){navigator.clipboard.writeText(t).then(done,function(){});}
+  };
+
+  if(typeof Html5Qrcode==='undefined'){
+    say('Não foi possível carregar a biblioteca de leitura. Você ainda pode digitar o número abaixo.',true);
+    startBtn.disabled=true;$('file').disabled=true;return;
+  }
 
   var F=Html5QrcodeSupportedFormats;
   var formats=['QR_CODE','AZTEC','CODABAR','CODE_39','CODE_93','CODE_128','DATA_MATRIX','ITF','EAN_13','EAN_8','PDF_417','RSS_14','RSS_EXPANDED','UPC_A','UPC_E']
     .map(function(n){return F[n];}).filter(function(v){return v!==undefined;});
-
   function make(){return new Html5Qrcode('reader',{formatsToSupport:formats,verbose:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}});}
 
-  function show(text,res){
-    try{if(navigator.vibrate)navigator.vibrate(100);}catch(e){}
-    var f='';try{f=res.result.format.formatName;}catch(e){}
-    $('fmt').textContent=f?('Formato: '+f.replace(/_/g,' ')):'';
-    $('code').textContent=text;resultEl.style.display='block';
+  function getTrack(){
+    var v=document.querySelector('#reader video');
+    return (v&&v.srcObject&&v.srcObject.getVideoTracks)?v.srcObject.getVideoTracks()[0]:null;
   }
+  function setupControls(){
+    var tr=getTrack(),caps=(tr&&tr.getCapabilities)?tr.getCapabilities():{};
+    $('tools').style.display='block';
+    torchOn=false;torchBtn.textContent='Ligar lanterna';
+    torchBtn.style.display=caps.torch?'block':'none';
+    if(caps.zoom){
+      zoomEl.min=caps.zoom.min;zoomEl.max=caps.zoom.max;zoomEl.step=caps.zoom.step||0.1;
+      var cur=(tr.getSettings&&tr.getSettings().zoom)||caps.zoom.min;zoomEl.value=cur;
+      $('zoomRow').style.display='flex';
+    }else{$('zoomRow').style.display='none';}
+  }
+  function hideControls(){$('tools').style.display='none';torchOn=false;}
+
+  torchBtn.onclick=function(){
+    var tr=getTrack();if(!tr)return;
+    var want=!torchOn;
+    tr.applyConstraints({advanced:[{torch:want}]}).then(function(){
+      torchOn=want;torchBtn.textContent=torchOn?'Desligar lanterna':'Ligar lanterna';
+    }).catch(function(){say('Este aparelho não permitiu ligar a lanterna.',true);});
+  };
+  zoomEl.oninput=function(){
+    var tr=getTrack();if(!tr)return;
+    tr.applyConstraints({advanced:[{zoom:parseFloat(zoomEl.value)}]}).catch(function(){});
+  };
 
   function stop(){
+    hideControls();
     if(!scanner||!running)return Promise.resolve();
     running=false;
     return scanner.stop().then(function(){scanner.clear();}).catch(function(){});
@@ -61,7 +130,7 @@ input[type=file]{display:none}
 
   startBtn.onclick=function(){
     if(running){stop().then(function(){startBtn.textContent='Iniciar leitura';say('Leitura parada.');});return;}
-    if(!window.isSecureContext){say('A câmera só funciona em páginas HTTPS.',true);return;}
+    if(!window.isSecureContext){say('A câmera só funciona em páginas HTTPS. Você pode digitar o número abaixo.',true);return;}
     resultEl.style.display='none';say('Abrindo a câmera…');
     scanner=make();
     scanner.start(
@@ -72,30 +141,24 @@ input[type=file]{display:none}
     ).then(function(){
       running=true;startBtn.textContent='Parar';
       say('Aponte para o código, reto e a uns 15–20 cm, com boa luz.');
+      setupControls();
     }).catch(function(e){
       running=false;
-      say('Erro ao abrir a câmera: '+(e&&e.message?e.message:e)+' — use “Ler a partir de uma foto”.',true);
+      say('Erro ao abrir a câmera: '+(e&&e.message?e.message:e)+' — use a foto ou digite o número.',true);
     });
   };
 
   $('file').onchange=function(){
     var f=this.files&&this.files[0];if(!f)return;
-    var input=this;
-    say('Lendo a foto…');
+    var input=this;say('Lendo a foto…');
     stop().then(function(){
       var s=make();
       return s.scanFile(f,true).then(function(text){
         say('Código lido.');show(text,null);
       }).catch(function(){
-        say('Nenhum código encontrado na foto. Chegue mais perto e mantenha o código nítido.',true);
+        say('Nenhum código encontrado na foto. Tente de novo ou digite o número abaixo.',true);
       }).then(function(){try{s.clear();}catch(e){}input.value='';});
     });
-  };
-
-  $('copy').onclick=function(){
-    var t=$('code').textContent,b=this;
-    var done=function(){b.textContent='Copiado';setTimeout(function(){b.textContent='Copiar';},1200);};
-    if(navigator.clipboard){navigator.clipboard.writeText(t).then(done,function(){});}
   };
 })();
 </script>
