@@ -104,6 +104,7 @@ input[type=file]{display:none}
   <div id="result"><small id="fmt"></small><div id="code"></div><button class="sec" id="copy">Copiar</button></div>
 </main>
 
+<!-- SUBSTITUA, no seu arquivo, tudo desde a linha do <script src="...html5-qrcode..."> até o </script> final por este conteúdo -->
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script>
 (function(){
@@ -158,7 +159,8 @@ input[type=file]{display:none}
   };
   window.addEventListener('error',function(e){dlog('erro','JS: '+e.message+(e.filename?' ('+String(e.filename).split('/').pop()+':'+e.lineno+')':''));});
   window.addEventListener('unhandledrejection',function(e){dlog('erro','Promessa rejeitada: '+(e.reason&&e.reason.message?e.reason.message:e.reason));});
-  dlog('info','Página carregada · HTTPS: '+(window.isSecureContext?'sim':'NÃO')+' · biblioteca: '+(typeof Html5Qrcode!=='undefined'?'carregada':'NÃO carregada')+' · leitor nativo: '+(('BarcodeDetector' in window)?'sim':'não'));
+  var hasBD=('BarcodeDetector' in window);
+  dlog('info','Página carregada · HTTPS: '+(window.isSecureContext?'sim':'NÃO')+' · biblioteca: '+(typeof Html5Qrcode!=='undefined'?'carregada':'NÃO carregada')+' · leitor nativo: '+(hasBD?'sim':'não'));
   dlog('info','Navegador: '+navigator.userAgent.slice(0,110));
   // ---------- fim do modo dev ----------
 
@@ -195,6 +197,101 @@ input[type=file]{display:none}
     .map(function(n){return F[n];}).filter(function(v){return v!==undefined;});
   function make(){return new Html5Qrcode('reader',{formatsToSupport:formats,verbose:false,experimentalFeatures:{useBarCodeDetectorIfSupported:true}});}
 
+  // =====================================================================
+  //  NOVO: utilitários de imagem (recortar, girar, realçar contraste)
+  // =====================================================================
+  // Recorta uma região de "src" (vídeo ou canvas) e redimensiona para a largura outW
+  function cropCanvas(src,sx,sy,sw,sh,outW){
+    var k=outW/sw,c=document.createElement('canvas');
+    c.width=Math.round(outW);c.height=Math.round(sh*k);
+    c.getContext('2d').drawImage(src,sx,sy,sw,sh,0,0,c.width,c.height);
+    return c;
+  }
+  // Gira um canvas em 90/180/270 graus (0 devolve o próprio canvas)
+  function rotate(src,deg){
+    if(!deg)return src;
+    var w=src.width,h=src.height,c=document.createElement('canvas'),q=deg%180;
+    c.width=q?h:w;c.height=q?w:h;
+    var x=c.getContext('2d');
+    x.translate(c.width/2,c.height/2);x.rotate(deg*Math.PI/180);x.drawImage(src,-w/2,-h/2);
+    return c;
+  }
+  // Tons de cinza + esticar contraste (ajuda o OCR em plaqueta com reflexo)
+  function enhance(c){
+    var x=c.getContext('2d'),d=x.getImageData(0,0,c.width,c.height),p=d.data,i,g,lo=255,hi=0;
+    for(i=0;i<p.length;i+=4){g=p[i]*0.299+p[i+1]*0.587+p[i+2]*0.114;p[i]=g;if(g<lo)lo=g;if(g>hi)hi=g;}
+    var r=Math.max(hi-lo,1);
+    for(i=0;i<p.length;i+=4){g=(p[i]-lo)*255/r;p[i]=p[i+1]=p[i+2]=g;}
+    x.putImageData(d,0,0);
+    return c;
+  }
+  function ocrPrep(c){return enhance(cropCanvas(c,0,0,c.width,c.height,Math.min(c.width,1400)));}
+
+  // =====================================================================
+  //  NOVO: decodificar código de barras a partir de um canvas
+  //  (usa um leitor separado e escondido, assim funciona com a câmera ligada)
+  // =====================================================================
+  var hostScanner=null;
+  function fscan(){
+    if(!hostScanner){
+      var h=document.createElement('div');h.id='rhost';
+      h.style.cssText='position:absolute;left:-9999px;top:0;width:300px;height:300px';
+      document.body.appendChild(h);
+      hostScanner=new Html5Qrcode('rhost',{formatsToSupport:formats,verbose:false});
+    }
+    return hostScanner;
+  }
+  function scanCanvas(c){
+    return new Promise(function(ok){
+      c.toBlob(function(b){
+        if(!b){ok(null);return;}
+        var f=new File([b],'frame.png',{type:'image/png'});
+        fscan().scanFile(f,false).then(function(t){ok(t);},function(){ok(null);});
+      },'image/png');
+    });
+  }
+
+  // =====================================================================
+  //  NOVO: OCR (Tesseract.js) só com dígitos, para plaqueta com número impresso
+  // =====================================================================
+  var TESS_URL='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+  var ocrWorker=null,ocrLoading=null,ocrOn=false,ocrTimer=0,lastOcr='',ocrHits=0;
+
+  function loadScript(src){
+    return new Promise(function(ok,fail){
+      var s=document.createElement('script');s.src=src;s.onload=ok;
+      s.onerror=function(){fail(new Error('falha ao carregar '+src));};
+      document.head.appendChild(s);
+    });
+  }
+  // Carrega o Tesseract só quando precisa (a 1ª vez baixa alguns MB)
+  function getOcr(){
+    if(ocrWorker)return Promise.resolve(ocrWorker);
+    if(ocrLoading)return ocrLoading;
+    ocrLoading=(typeof Tesseract!=='undefined'?Promise.resolve():loadScript(TESS_URL))
+      .then(function(){return Tesseract.createWorker('eng');})
+      .then(function(w){
+        // só dígitos; modo 11 = texto esparso (acha o número mesmo com outras coisas na imagem)
+        return w.setParameters({tessedit_char_whitelist:'0123456789',tessedit_pageseg_mode:'11'})
+          .then(function(){ocrWorker=w;dlog('ok','OCR pronto');return w;});
+      })
+      .catch(function(e){ocrLoading=null;dlog('erro','OCR indisponível: '+(e&&e.message?e.message:e));throw e;});
+    return ocrLoading;
+  }
+  // Escolhe o melhor número (5 a 9 dígitos) do resultado do OCR
+  function pickNumber(data){
+    var best=null,words=data.words||[];
+    words.forEach(function(w){
+      var t=(w.text||'').replace(/\D/g,'');
+      if(t.length>=5&&t.length<=9&&w.confidence>=70&&(!best||w.confidence>best.conf))best={text:t,conf:w.confidence};
+    });
+    if(!best){
+      var m=String(data.text||'').match(/\d{5,9}/);
+      if(m&&data.confidence>=70)best={text:m[0],conf:data.confidence};
+    }
+    return best;
+  }
+
   function getTrack(){
     var v=document.querySelector('#reader video');
     return (v&&v.srcObject&&v.srcObject.getVideoTracks)?v.srcObject.getVideoTracks()[0]:null;
@@ -225,16 +322,57 @@ input[type=file]{display:none}
   };
 
   function stop(){
+    ocrOn=false;clearTimeout(ocrTimer);          // NOVO: para o OCR junto com a câmera
     hideControls();
     if(!scanner||!running)return Promise.resolve();
     running=false;
     return scanner.stop().then(function(){scanner.clear();}).catch(function(){});
   }
 
+  // NOVO: ponto único de "achei o código" (vale para barras e para OCR)
+  function finish(text,res,label){
+    if(!running)return;                           // evita finalizar duas vezes
+    stop().then(function(){
+      startBtn.textContent='Ler outro código';
+      say('Código lido.');
+      show(text,res,label);
+      $('num').value=text;                        // já deixa no campo, caso precise corrigir
+    });
+  }
+
+  // NOVO: laço de leitura extra, roda em paralelo com a leitura de barras da câmera
+  //  1) se o navegador não tem leitor nativo, tenta o código de barras girado 90° (plaqueta vertical)
+  //  2) tenta ler o número impresso por OCR; exige a MESMA leitura 2 vezes seguidas
+  function ocrLoop(){
+    if(!ocrOn)return;
+    var v=document.querySelector('#reader video');
+    if(!v||!v.videoWidth){ocrTimer=setTimeout(ocrLoop,400);return;}
+    var vw=v.videoWidth,vh=v.videoHeight;
+    var pre=hasBD?Promise.resolve(null)
+      :scanCanvas(rotate(cropCanvas(v,0,0,vw,vh,Math.min(vw,1280)),90));
+    pre.then(function(t){
+      if(!ocrOn)return;
+      if(t){finish(t,null,'Código de barras (na vertical)');return;}
+      var sw=vw*0.9,sh=vh*0.6;
+      var c=enhance(cropCanvas(v,(vw-sw)/2,(vh-sh)/2,sw,sh,900));
+      return getOcr().then(function(w){return w.recognize(c);}).then(function(r){
+        if(!ocrOn)return;
+        var b=pickNumber(r.data);
+        if(b){
+          if(b.text===lastOcr)ocrHits++;else{lastOcr=b.text;ocrHits=1;}
+          dlog('info','OCR: '+b.text+' ('+Math.round(b.conf)+'%) x'+ocrHits);
+          if(ocrHits>=2){finish(b.text,null,'Número impresso (leitura por OCR)');return;}
+        }else{lastOcr='';ocrHits=0;}
+        ocrTimer=setTimeout(ocrLoop,150);
+      });
+    }).catch(function(e){ocrOn=false;dlog('erro','OCR parou: '+(e&&e.message?e.message:e));});
+  }
+
   startBtn.onclick=function(){
     if(running){stop().then(function(){startBtn.textContent='Iniciar leitura';say('Leitura parada.');});return;}
     if(!window.isSecureContext){say('A câmera só funciona em páginas HTTPS. Você pode digitar o número abaixo.',true);return;}
     resultEl.style.display='none';say('Abrindo a câmera…');
+    getOcr().catch(function(){});                 // NOVO: já baixa o OCR enquanto a câmera abre
     scanner=make();
     scanner.start(
       {facingMode:'environment'},
@@ -245,30 +383,75 @@ input[type=file]{display:none}
         qrbox:function(w,h){return {width:Math.floor(w*0.9),height:Math.floor(h*0.45)};},
         videoConstraints:{facingMode:'environment',width:{ideal:1920},height:{ideal:1080}}
       },
-      function(text,res){stop().then(function(){startBtn.textContent='Ler outro código';say('Código lido.');show(text,res);});},
+      function(text,res){finish(text,res);},      // código de barras lido
       onFrameError
     ).then(function(){resetCounters();
       running=true;startBtn.textContent='Parar';
-      say('Encaixe o código dentro do retângulo, reto e com boa luz.');
+      say('Aponte para o código de barras ou para o número impresso.');
       setupControls();logCaps();
+      ocrOn=true;lastOcr='';ocrHits=0;ocrLoop();  // NOVO: liga o laço de OCR
     }).catch(function(e){
       running=false;dlog('erro','start falhou: '+(e&&e.name?e.name+' — ':'')+(e&&e.message?e.message:e));
       say('Erro ao abrir a câmera: '+(e&&e.message?e.message:e)+' — use a foto ou digite o número.',true);
     });
   };
 
+  // =====================================================================
+  //  Foto: tenta barras (0° e 90°) e, se não achar, OCR (0°, 90°, 270°)
+  // =====================================================================
+  function fileToCanvas(f){
+    return new Promise(function(ok,fail){
+      var u=URL.createObjectURL(f),im=new Image();
+      im.onload=function(){
+        var w=im.naturalWidth,h=im.naturalHeight,k=Math.min(1,1600/Math.max(w,h)),c=document.createElement('canvas');
+        c.width=Math.round(w*k);c.height=Math.round(h*k);
+        c.getContext('2d').drawImage(im,0,0,c.width,c.height);
+        URL.revokeObjectURL(u);ok(c);
+      };
+      im.onerror=function(){URL.revokeObjectURL(u);fail(new Error('imagem inválida'));};
+      im.src=u;
+    });
+  }
+  function tryBarcodes(c){
+    return [0,90].reduce(function(p,a){
+      return p.then(function(t){
+        if(t)return t;
+        dlog('info','Foto: barras a '+a+'°');
+        return scanCanvas(rotate(c,a));
+      });
+    },Promise.resolve(null));
+  }
+  function tryOcr(c){
+    say('Procurando o número impresso… (na 1ª vez pode demorar)');
+    return getOcr().then(function(w){
+      return [0,90,270].reduce(function(p,a){
+        return p.then(function(best){
+          if(best)return best;
+          return w.recognize(ocrPrep(rotate(c,a))).then(function(r){
+            var b=pickNumber(r.data);
+            dlog('info','OCR foto '+a+'°: '+(b?b.text+' ('+Math.round(b.conf)+'%)':'nada'));
+            return b;
+          });
+        });
+      },Promise.resolve(null));
+    }).catch(function(){return null;});
+  }
+
   $('file').onchange=function(){
     var f=this.files&&this.files[0];if(!f)return;
     var input=this;say('Lendo a foto…');
-    stop().then(function(){
-      var s=make();
-      return s.scanFile(f,false).then(function(text){
-        say('Código lido.');show(text,null);
-      }).catch(function(e){
-        dlog('erro','Foto: '+(e&&e.message?e.message:e));
-        say('Nenhum código encontrado na foto. Tente de novo ou digite o número abaixo.',true);
-      }).then(function(){try{s.clear();}catch(e){}input.value='';});
-    });
+    stop().then(function(){return fileToCanvas(f);}).then(function(c){
+      return tryBarcodes(c).then(function(t){
+        if(t)return {text:t,label:null};
+        return tryOcr(c).then(function(b){return b?{text:b.text,label:'Número impresso (leitura por OCR)'}:null;});
+      });
+    }).then(function(r){
+      if(r){say('Código lido.');show(r.text,null,r.label);$('num').value=r.text;}
+      else say('Nenhum código encontrado na foto. Tente de novo ou digite o número abaixo.',true);
+    }).catch(function(e){
+      dlog('erro','Foto: '+(e&&e.message?e.message:e));
+      say('Não consegui ler a foto. Tente de novo ou digite o número abaixo.',true);
+    }).then(function(){input.value='';});
   };
 })();
 </script>
